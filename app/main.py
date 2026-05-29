@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -7,6 +7,10 @@ from datetime import datetime, date
 import shutil
 import uuid
 import os
+import requests
+
+from PIL import Image, ImageDraw, ImageFont
+from moviepy import ImageClip, concatenate_videoclips
 
 from dotenv import load_dotenv
 from qcloud_cos import CosConfig, CosS3Client
@@ -24,10 +28,17 @@ client = CosS3Client(config)
 app = FastAPI(title="守护派派")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "../uploads")
+PROJECT_DIR = os.path.join(BASE_DIR, "..")
+UPLOAD_DIR = os.path.join(PROJECT_DIR, "uploads")
+VIDEO_DIR = os.path.join(PROJECT_DIR, "videos")
+FRAME_DIR = os.path.join(VIDEO_DIR, "frames")
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
+os.makedirs(FRAME_DIR, exist_ok=True)
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+app.mount("/videos", StaticFiles(directory=VIDEO_DIR), name="videos")
 
 DATABASE_URL = "sqlite:///./paipai.db"
 
@@ -98,8 +109,54 @@ def baby_age_text(target_date):
     return f"第{days}天（{months}个月{extra_days}天）"
 
 
-def get_baby_days():
-    return (date.today() - BABY_BIRTHDAY).days + 1
+def get_font(size):
+    font_paths = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode.ttf"
+    ]
+
+    for path in font_paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
+
+
+def create_video_frame(image_path, note, created_at, output_path):
+    width = 1080
+    height = 1920
+
+    background = Image.new("RGB", (width, height), (245, 245, 245))
+
+    image = Image.open(image_path).convert("RGB")
+    image.thumbnail((1000, 1350))
+
+    x = (width - image.width) // 2
+    y = 160
+
+    background.paste(image, (x, y))
+
+    draw = ImageDraw.Draw(background)
+
+    title_font = get_font(56)
+    text_font = get_font(42)
+    small_font = get_font(34)
+
+    upload_date = created_at.date()
+    age_text = baby_age_text(upload_date)
+
+    title = "守护派派成长记录"
+    note_text = note or "宝宝成长照片"
+    date_text = f"📅 {upload_date}"
+    age_line = f"👶 {age_text}"
+
+    draw.text((80, 40), title, fill=(20, 20, 20), font=title_font)
+    draw.text((80, 1540), note_text, fill=(20, 20, 20), font=text_font)
+    draw.text((80, 1620), date_text, fill=(90, 90, 90), font=small_font)
+    draw.text((80, 1680), age_line, fill=(90, 90, 90), font=small_font)
+
+    background.save(output_path)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -124,7 +181,7 @@ def root():
                 text-align: center;
             }}
             .box {{
-                max-width: 650px;
+                max-width: 700px;
                 margin: 60px auto;
                 background: white;
                 padding: 30px;
@@ -145,6 +202,9 @@ def root():
                 border-radius: 10px;
                 font-size: 18px;
             }}
+            .video {{
+                background: #52c41a;
+            }}
         </style>
     </head>
     <body>
@@ -158,6 +218,7 @@ def root():
             <a href="/upload">上传照片</a>
             <a href="/gallery">查看相册</a>
             <a href="/timeline">成长时间轴</a>
+            <a class="video" href="/video">成长视频</a>
         </div>
     </body>
     </html>
@@ -305,6 +366,161 @@ async def upload_photo(
     </body>
     </html>
     """)
+
+
+@app.get("/video", response_class=HTMLResponse)
+def video_page():
+    video_path = os.path.join(VIDEO_DIR, "paipai_growth.mp4")
+    has_video = os.path.exists(video_path)
+
+    download_html = ""
+
+    if has_video:
+        download_html = """
+        <a class="download" href="/download-video">下载成长视频</a>
+        <video controls width="100%" style="margin-top:20px; border-radius:12px;">
+            <source src="/videos/paipai_growth.mp4" type="video/mp4">
+        </video>
+        """
+
+    return f"""
+    <html>
+    <head>
+        <title>派派成长视频</title>
+        <style>
+            body {{
+                font-family: Arial;
+                background: #f5f5f5;
+                padding: 30px;
+                text-align: center;
+            }}
+            .box {{
+                max-width: 700px;
+                margin: 60px auto;
+                background: white;
+                padding: 30px;
+                border-radius: 18px;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+            }}
+            a, button {{
+                display: inline-block;
+                margin: 10px;
+                padding: 14px 22px;
+                background: #1677ff;
+                color: white;
+                text-decoration: none;
+                border: none;
+                border-radius: 10px;
+                font-size: 18px;
+                cursor: pointer;
+            }}
+            .download {{
+                background: #52c41a;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>派派成长视频 🎬</h1>
+            <p>系统会按照片上传时间自动排序，生成成长纪念视频。</p>
+
+            <form action="/generate-video" method="post">
+                <button type="submit">生成成长视频</button>
+            </form>
+
+            <a href="/">返回首页</a>
+            <a href="/gallery">查看相册</a>
+
+            {download_html}
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.post("/generate-video")
+def generate_video():
+    db = SessionLocal()
+    media_list = db.query(Media).order_by(Media.created_at.asc()).all()
+    db.close()
+
+    if not media_list:
+        return HTMLResponse("""
+        <h1>还没有照片，无法生成视频</h1>
+        <a href="/upload">先去上传照片</a>
+        """)
+
+    for file_name in os.listdir(FRAME_DIR):
+        file_path = os.path.join(FRAME_DIR, file_name)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+
+    clips = []
+
+    for index, item in enumerate(media_list):
+        try:
+            temp_image_path = os.path.join(FRAME_DIR, f"source_{index}.jpg")
+            frame_path = os.path.join(FRAME_DIR, f"frame_{index}.jpg")
+
+            response = requests.get(item.file_path, timeout=20)
+            response.raise_for_status()
+
+            with open(temp_image_path, "wb") as f:
+                f.write(response.content)
+
+            create_video_frame(
+                image_path=temp_image_path,
+                note=item.note,
+                created_at=item.created_at,
+                output_path=frame_path
+            )
+
+            clip = ImageClip(frame_path).with_duration(2.5)
+            clips.append(clip)
+
+        except Exception as e:
+            print(f"生成第 {index + 1} 张照片失败：{e}")
+
+    if not clips:
+        return HTMLResponse("""
+        <h1>视频生成失败</h1>
+        <p>没有可用照片，请检查腾讯云图片是否可以访问。</p>
+        <a href="/gallery">返回相册</a>
+        """)
+
+    final_video = concatenate_videoclips(clips, method="compose")
+    output_path = os.path.join(VIDEO_DIR, "paipai_growth.mp4")
+
+    final_video.write_videofile(
+        output_path,
+        fps=24,
+        codec="libx264",
+        audio=False
+    )
+
+    final_video.close()
+
+    for clip in clips:
+        clip.close()
+
+    return RedirectResponse(url="/video", status_code=303)
+
+
+@app.get("/download-video")
+def download_video():
+    video_path = os.path.join(VIDEO_DIR, "paipai_growth.mp4")
+
+    if not os.path.exists(video_path):
+        return HTMLResponse("""
+        <h1>还没有生成视频</h1>
+        <a href="/video">返回生成页面</a>
+        """)
+
+    return FileResponse(
+        video_path,
+        media_type="video/mp4",
+        filename="paipai_growth.mp4"
+    )
 
 
 @app.get("/timeline", response_class=HTMLResponse)
@@ -549,6 +765,7 @@ def gallery():
             <a href="/">返回首页</a>
             <a href="/upload">上传新照片</a>
             <a href="/timeline">成长时间轴</a>
+            <a href="/video">成长视频</a>
         </div>
         <div class="gallery">
     """
