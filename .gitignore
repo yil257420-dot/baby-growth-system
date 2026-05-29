@@ -1,0 +1,7 @@
+.env
+venv/
+__pycache__/
+*.pyc
+paipai.db
+uploads/
+.DS_Store
