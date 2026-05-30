@@ -7,4 +7,4 @@ pillow
 moviepy
 numpy
 requests
-qcloud-cos-sdk
+cos-python-sdk-v5
