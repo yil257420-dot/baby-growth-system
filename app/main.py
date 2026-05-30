@@ -362,6 +362,38 @@ def make_diary(note, created_at):
 
 愿派派继续健康、快乐、平安地长大。"""
 
+
+def detect_milestone(note):
+    note_text = note.strip() if note else ""
+
+    milestone_keywords = [
+        "第一次",
+        "翻身",
+        "抬头",
+        "坐",
+        "爬",
+        "站",
+        "走",
+        "迈步",
+        "说话",
+        "爸爸",
+        "妈妈",
+        "长牙",
+        "满月",
+        "百天",
+        "100天",
+        "辅食",
+        "游泳",
+        "洗澡"
+    ]
+
+    for keyword in milestone_keywords:
+        if keyword in note_text:
+            return note_text
+
+    return None
+
+
 def get_font(size):
     font_paths = [
         "/System/Library/Fonts/PingFang.ttc",
@@ -528,7 +560,7 @@ def upload_page():
                 <input type="hidden" name="baby_id" value="1">
 
                 <label>照片备注</label>
-                <textarea name="note" placeholder="例如：今天第一次主动抓玩具"></textarea>
+                <textarea name="note" placeholder="例如：第一次翻身、今天第一次主动抓玩具"></textarea>
 
                 <label>选择照片</label>
                 <input type="file" name="file" accept="image/*" required>
@@ -590,8 +622,28 @@ async def upload_photo(
     )
 
     db.add(media)
+
+    milestone_title = detect_milestone(note)
+
+    if milestone_title:
+        milestone = Milestone(
+            event_date=str(now.date()),
+            title=milestone_title,
+            description=f"系统根据照片备注自动记录：{milestone_title}"
+        )
+        db.add(milestone)
+
     db.commit()
     db.close()
+
+    milestone_html = ""
+
+    if milestone_title:
+        milestone_html = f"""
+        <div class="milestone">
+            🎉 已自动加入成长时间轴：{esc(milestone_title)}
+        </div>
+        """
 
     return HTMLResponse(f"""
     <html>
@@ -618,6 +670,13 @@ async def upload_photo(
                 padding: 18px;
                 border-radius: 12px;
             }}
+            .milestone {{
+                margin-top: 18px;
+                padding: 14px;
+                background: #fff7e6;
+                border-radius: 10px;
+                font-size: 18px;
+            }}
             a {{
                 display: block;
                 margin-top: 18px;
@@ -630,7 +689,9 @@ async def upload_photo(
         <div class="box">
             <h1>上传成功 🎉</h1>
             <div class="diary">{esc(diary)}</div>
+            {milestone_html}
             <a href="/diary">查看成长日记</a>
+            <a href="/timeline">查看成长时间轴</a>
             <a href="/gallery">查看相册</a>
             <a href="/upload">继续上传</a>
             <a href="/">返回首页</a>
